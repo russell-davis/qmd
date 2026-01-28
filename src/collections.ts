@@ -29,6 +29,7 @@ export interface Collection {
   pattern: string;        // Glob pattern (e.g., "**/*.md")
   context?: ContextMap;   // Optional context definitions
   update?: string;        // Optional bash command to run during qmd update
+  exclude?: string[];     // Optional glob patterns to exclude (e.g., ["Daily/**"])
 }
 
 /**

@@ -961,3 +961,98 @@ describe("status and collection list hide filesystem paths", () => {
     expect(stdout).not.toMatch(/Path:\s+\//);
   });
 });
+
+// =============================================================================
+// Collection Exclude Patterns
+// =============================================================================
+
+describe("collection exclude patterns", () => {
+  let localDbPath: string;
+  let localConfigDir: string;
+  let excludeTestDir: string;
+
+  beforeAll(async () => {
+    const env = await createIsolatedTestEnv("exclude-patterns");
+    localDbPath = env.dbPath;
+    localConfigDir = env.configDir;
+
+    // Create test directory with files to include and exclude
+    excludeTestDir = await mkdtemp(join(tmpdir(), "qmd-exclude-"));
+    await mkdir(join(excludeTestDir, "docs"), { recursive: true });
+    await mkdir(join(excludeTestDir, "Daily"), { recursive: true });
+    await mkdir(join(excludeTestDir, "Daily", "nested"), { recursive: true });
+
+    // Files that should be included
+    await writeFile(join(excludeTestDir, "README.md"), "# Main README");
+    await writeFile(join(excludeTestDir, "docs", "guide.md"), "# Guide");
+
+    // Files that should be excluded
+    await writeFile(join(excludeTestDir, "Daily", "2025-01-27.md"), "# Daily 1");
+    await writeFile(join(excludeTestDir, "Daily", "2025-01-26.md"), "# Daily 2");
+    await writeFile(join(excludeTestDir, "Daily", "nested", "deep.md"), "# Nested daily");
+
+    // Write YAML config with exclude pattern
+    await writeFile(
+      join(localConfigDir, "index.yml"),
+      `collections:
+  test-vault:
+    path: ${excludeTestDir}
+    pattern: "**/*.md"
+    exclude:
+      - "Daily/**"
+`
+    );
+  });
+
+  afterAll(async () => {
+    if (excludeTestDir) {
+      await rm(excludeTestDir, { recursive: true, force: true });
+    }
+  });
+
+  test("excludes files matching exclude patterns during update", async () => {
+    // Run update to index the collection
+    const { stdout: updateOut, exitCode: updateCode } = await runQmd(
+      ["update"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(updateCode).toBe(0);
+
+    // List files in the collection
+    const { stdout, exitCode } = await runQmd(
+      ["ls", "test-vault"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(exitCode).toBe(0);
+
+    // Should include non-excluded files
+    expect(stdout).toContain("readme.md");
+    expect(stdout).toContain("docs/guide.md");
+
+    // Should NOT include excluded files
+    expect(stdout).not.toContain("Daily/");
+    expect(stdout).not.toContain("2025-01-27.md");
+    expect(stdout).not.toContain("2025-01-26.md");
+    expect(stdout).not.toContain("nested/deep.md");
+  });
+
+  test("search does not find content in excluded files", async () => {
+    // Search for content that only exists in excluded files
+    const { stdout, exitCode } = await runQmd(
+      ["search", "Daily", "-c", "test-vault"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("No results");
+  });
+
+  test("search finds content in included files", async () => {
+    // Search for content in included files
+    const { stdout, exitCode } = await runQmd(
+      ["search", "Guide", "-c", "test-vault"],
+      { dbPath: localDbPath, configDir: localConfigDir }
+    );
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("guide.md");
+  });
+});
