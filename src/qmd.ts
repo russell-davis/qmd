@@ -424,7 +424,7 @@ async function updateCollections(): Promise<void> {
       }
     }
 
-    await indexFiles(col.pwd, col.glob_pattern, col.name, true);
+    await indexFiles(col.pwd, col.glob_pattern, col.name, true, yamlCol?.exclude || []);
     console.log("");
   }
 
@@ -1351,7 +1351,7 @@ function collectionRename(oldName: string, newName: string): void {
   console.log(`  Virtual paths updated: ${c.cyan}qmd://${oldName}/${c.reset} → ${c.cyan}qmd://${newName}/${c.reset}`);
 }
 
-async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, collectionName?: string, suppressEmbedNotice: boolean = false): Promise<void> {
+async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, collectionName?: string, suppressEmbedNotice: boolean = false, excludePatterns: string[] = []): Promise<void> {
   const db = getDb();
   const resolvedPwd = pwd || getPwd();
   const now = new Date().toISOString();
@@ -1370,6 +1370,10 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
   progress.indeterminate();
   const glob = new Glob(globPattern);
   const files: string[] = [];
+
+  // Pre-compile exclude pattern globs for efficiency
+  const excludeGlobs = excludePatterns.map(p => new Glob(p));
+
   for await (const file of glob.scan({ cwd: resolvedPwd, onlyFiles: true, followSymlinks: true })) {
     // Skip node_modules, hidden folders (.*), and other common excludes
     const parts = file.split("/");
@@ -1378,9 +1382,13 @@ async function indexFiles(pwd?: string, globPattern: string = DEFAULT_GLOB, coll
       part.startsWith(".") ||
       excludeDirs.includes(part)
     );
-    if (!shouldSkip) {
-      files.push(file);
-    }
+    if (shouldSkip) continue;
+
+    // Check user-defined exclude patterns
+    const matchesExclude = excludeGlobs.some(g => g.match(file));
+    if (matchesExclude) continue;
+
+    files.push(file);
   }
 
   const total = files.length;
