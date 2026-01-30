@@ -150,7 +150,7 @@ export type RerankDocument = {
 const DEFAULT_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
 const DEFAULT_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
 // const DEFAULT_GENERATE_MODEL = "hf:ggml-org/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf";
-const DEFAULT_GENERATE_MODEL = "hf:ggml-org/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q8_0.gguf";
+const DEFAULT_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf";
 
 // Local model cache directory
 const MODEL_CACHE_DIR = join(homedir(), ".cache", "qmd", "models");
@@ -241,8 +241,9 @@ export class LlamaCpp implements LLM {
   private rerankModelUri: string;
   private modelCacheDir: string;
 
-  // Ensure we don't load the same model concurrently (which can allocate duplicate VRAM).
+  // Ensure we don't load the same model/context concurrently (which can allocate duplicate VRAM).
   private embedModelLoadPromise: Promise<LlamaModel> | null = null;
+  private embedContextCreatePromise: Promise<LlamaEmbeddingContext> | null = null;
   private generateModelLoadPromise: Promise<LlamaModel> | null = null;
   private rerankModelLoadPromise: Promise<LlamaModel> | null = null;
 
@@ -402,11 +403,28 @@ export class LlamaCpp implements LLM {
 
   /**
    * Load embedding context (lazy). Context can be disposed and recreated without reloading the model.
+   * Uses promise guard to prevent concurrent context creation race condition.
    */
   private async ensureEmbedContext(): Promise<LlamaEmbeddingContext> {
     if (!this.embedContext) {
-      const model = await this.ensureEmbedModel();
-      this.embedContext = await model.createEmbeddingContext();
+      // If context creation is already in progress, wait for it
+      if (this.embedContextCreatePromise) {
+        return await this.embedContextCreatePromise;
+      }
+
+      // Start context creation and store promise so concurrent calls wait
+      this.embedContextCreatePromise = (async () => {
+        const model = await this.ensureEmbedModel();
+        const context = await model.createEmbeddingContext();
+        this.embedContext = context;
+        return context;
+      })();
+
+      try {
+        await this.embedContextCreatePromise;
+      } finally {
+        this.embedContextCreatePromise = null;
+      }
     }
     this.touchActivity();
     return this.embedContext;
@@ -549,6 +567,7 @@ export class LlamaCpp implements LLM {
         texts.map(async (text) => {
           try {
             const embedding = await context.getEmbeddingFor(text);
+            this.touchActivity();  // Keep-alive during slow batches
             return {
               embedding: Array.from(embedding.vector),
               model: this.embedModelUri,
@@ -781,8 +800,9 @@ Final Output:`;
     this.rerankModel = null;
     this.llama = null;
 
-    // Clear any in-flight load promises
+    // Clear any in-flight load/create promises
     this.embedModelLoadPromise = null;
+    this.embedContextCreatePromise = null;
     this.generateModelLoadPromise = null;
     this.rerankModelLoadPromise = null;
   }
